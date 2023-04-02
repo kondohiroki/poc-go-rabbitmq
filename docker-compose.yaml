@@ -8,19 +8,31 @@ services:
     environment:
       - RABBITMQ_DEFAULT_USER=myuser
       - RABBITMQ_DEFAULT_PASS=mypassword
+    healthcheck:
+      test: [ "CMD", "rabbitmqctl", "status" ]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 5s
 
   go-producer:
-    build: ./go-producer
+    build:
+      args:
+        - directory=go-producer
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "3099:3000" # HTTP API port
     environment:
       - RABBITMQ_URL=amqp://myuser:mypassword@rabbitmq:5672/
 
   go-consumer:
-    build: ./go-consumer
+    build:
+      args:
+        - directory=go-consumer
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
     environment:
       - RABBITMQ_URL=amqp://myuser:mypassword@rabbitmq:5672/

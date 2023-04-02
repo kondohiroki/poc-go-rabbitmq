@@ -1,21 +1,32 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/streadway/amqp"
 )
 
+type Job struct {
+	ID       string
+	Status   string
+	Callback string
+}
+
 func main() {
 	onClose := make(chan *amqp.Error)
+	var conn *amqp.Connection
 	var ch *amqp.Channel
+	var newCh *amqp.Channel
+	var q amqp.Queue
 
 	go func() {
 		for {
-			conn, newCh := setupRabbitMQ("amqp://myuser:mypassword@rabbitmq:5672/", onClose)
+			conn, newCh, q = setupRabbitMQ("amqp://myuser:mypassword@rabbitmq:5672/", onClose)
 			ch = newCh
 			<-onClose
 			log.Println("RabbitMQ channel closed. Reconnecting...")
@@ -28,21 +39,72 @@ func main() {
 
 	app := fiber.New()
 
+	var jobs = make(map[string]*Job)
+
 	app.Post("/start-task", func(c *fiber.Ctx) error {
-		qName := "tasks"
-		err := ch.Publish(
-			"",    // exchange
-			qName, // routing key
-			false, // mandatory
-			false, // immediate
+		jobID := uuid.New().String()
+		job := &Job{
+			ID:       jobID,
+			Status:   "queued",
+			Callback: "https://4d368900-e5d5-45ab-a212-ce230bf44ad2.mock.pstmn.io/callback",
+		}
+		jobs[jobID] = job
+
+		taskMessage, err := json.Marshal(job)
+		failOnError(err, "Failed to marshal task message")
+
+		err = ch.Publish(
+			"",     // exchange
+			q.Name, // routing key
+			false,  // mandatory
+			false,  // immediate
 			amqp.Publishing{
-				ContentType:  "text/plain",
-				Body:         []byte("Long running task"),
+				ContentType:  "application/json",
+				Body:         taskMessage,
 				DeliveryMode: amqp.Persistent, // Set the DeliveryMode to Persistent
 			})
 		failOnError(err, "Failed to publish a task")
 
-		log.Printf("Sent a task: Long running task")
+		log.Printf("Sent a task: %s", job.ID)
+		return c.JSON(fiber.Map{"job_id": job.ID})
+	})
+
+	app.Get("/jobs/:id", func(c *fiber.Ctx) error {
+		jobID := c.Params("id")
+		job, ok := jobs[jobID]
+		if !ok {
+			return c.Status(fiber.StatusNotFound).SendString("Job not found")
+		}
+		return c.JSON(job)
+	})
+
+	app.Post("/jobs/:id/retry", func(c *fiber.Ctx) error {
+		jobID := c.Params("id")
+		job, ok := jobs[jobID]
+		if !ok {
+			return c.Status(fiber.StatusNotFound).SendString("Job not found")
+		}
+		if job.Status != "done" && job.Status != "failed" {
+			return c.Status(fiber.StatusBadRequest).SendString("Job cannot be retried")
+		}
+
+		job.Status = "queued"
+		taskMessage, err := json.Marshal(job)
+		failOnError(err, "Failed to marshal task message")
+
+		err = ch.Publish(
+			"",     // exchange
+			q.Name, // routing key
+			false,  // mandatory
+			false,  // immediate
+			amqp.Publishing{
+				ContentType:  "application/json",
+				Body:         taskMessage,
+				DeliveryMode: amqp.Persistent, // Set the DeliveryMode to Persistent
+			})
+		failOnError(err, "Failed to publish a task")
+
+		log.Printf("Retried task: %s", job.ID)
 		return c.SendStatus(fiber.StatusAccepted)
 	})
 

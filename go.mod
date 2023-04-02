@@ -1,4 +1,4 @@
-module github.com/kondohiroki/poc-rabbitmq/go-producer
+module github.com/kondohiroki/poc-go-rabbitmq
 
 go 1.20
 
